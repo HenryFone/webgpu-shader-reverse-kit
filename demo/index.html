@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>MetalForge WGSL 复刻运行器</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0b0d;color:#e8e8ea;
+    font:13px/1.5 "JetBrains Mono",ui-monospace,Consolas,monospace}
+  #wrap{display:grid;grid-template-columns:1fr 300px;height:100%}
+  #stage{position:relative;background:#000}
+  canvas{width:100%;height:100%;display:block}
+  aside{border-left:1px solid #1e1e22;padding:14px;overflow:auto}
+  h1{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#8b8b93;margin:0 0 12px}
+  label{display:block;margin:10px 0 2px;color:#9a9aa2;font-size:11px}
+  input[type=range]{width:100%;accent-color:#5b8cff}
+  .val{float:right;color:#e8e8ea}
+  #err{position:absolute;left:12px;bottom:12px;right:12px;color:#ff8080;
+    white-space:pre-wrap;font-size:11px;max-height:40%;overflow:auto}
+  .hint{color:#5f5f68;font-size:11px;margin-top:16px;border-top:1px solid #1e1e22;padding-top:10px}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage"><canvas id="c"></canvas><div id="err"></div></div>
+  <aside>
+    <h1>Liquid Chrome · uniform 控制</h1>
+    <div id="sliders"></div>
+    <div class="hint">
+      把任意 wgsl/*.wgsl 的源码贴进 SHADER_BODY，<br />
+      再按它的 <code>struct Uniforms</code> 字段顺序改 FLOATS，<br />
+      即可运行该效果（仅支持单 pass：@group(0) @binding(0) var&lt;uniform&gt; u）。
+    </div>
+  </aside>
+</div>
+<script id="shader" type="text/wgsl">
+// ── Liquid Chrome（来自 wgsl/liquid-chrome.wgsl，原样保留数学部分）──
+struct Uniforms {
+  size:         vec2<f32>,
+  time:         f32,
+  speed:        f32,
+  scale:        f32,
+  warp:         f32,
+  contrast:     f32,
+  specPower:    f32,
+  specStrength: f32,
+  tintStrength: f32,
+  shadow:       vec4<f32>,
+  silver:       vec4<f32>,
+  highlight:    vec4<f32>,
+  tint:         vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> u: Uniforms;
+
+fn lcHash(pIn: vec2<f32>) -> f32 {
+  var p = fract(pIn * vec2<f32>(123.34, 456.21));
+  p = p + vec2<f32>(dot(p, p + 45.32));
+  return fract(p.x * p.y);
+}
+
+fn lcNoise(p: vec2<f32>) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  let a = lcHash(i);
+  let b = lcHash(i + vec2<f32>(1.0, 0.0));
+  let c = lcHash(i + vec2<f32>(0.0, 1.0));
+  let d = lcHash(i + vec2<f32>(1.0, 1.0));
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+fn liquidChromeAnim(uv01: vec2<f32>) -> vec4<f32> {
+  let size = u.size;
+  let position = uv01 * size;
+  let uv = (position * 2.0 - size) / max(min(size.x, size.y), 1.0);
+
+  let t = u.time * u.speed;
+
+  let p  = uv * max(u.scale, 0.0001);
+  let n1 = lcNoise(p + vec2<f32>(t, t * 0.6));
+  let n2 = lcNoise(p + n1 * u.warp + vec2<f32>(-t * 0.4, t * 0.3));
+  let n3 = lcNoise(p * 1.5 + n2 * u.warp + vec2<f32>(t * 0.2, -t * 0.5));
+
+  var chrome = clamp(n3 * 0.5 + 0.5, 0.0, 1.0);
+  chrome = pow(chrome, max(u.contrast, 0.001));
+
+  let sh = u.shadow.rgb;
+  let sv = u.silver.rgb;
+  let hl = u.highlight.rgb;
+  let tn = u.tint.rgb;
+
+  var col = mix(sh, sv, chrome);
+  col = mix(col, hl, smoothstep(0.8, 0.98, chrome));
+  col = col + tn * smoothstep(0.3, 0.6, n1) * u.tintStrength;
+
+  let spec = pow(max(chrome, 0.0), max(u.specPower, 0.001));
+  col = col + vec3<f32>(0.6, 0.6, 0.8) * spec * u.specStrength;
+
+  return vec4<f32>(col, 1.0);
+}
+
+// ── 通用外壳：全屏三角形 + 调用 <效果名>Anim(uv) ──
+struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+  var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+  var o: VSOut;
+  o.pos = vec4<f32>(p[vi], 0.0, 1.0);
+  o.uv = vec2<f32>((p[vi].x + 1.0) * 0.5, (1.0 - p[vi].y) * 0.5);
+  return o;
+}
+
+@fragment
+fn fs(in: VSOut) -> @location(0) vec4<f32> {
+  return liquidChromeAnim(in.uv);
+}
+</script>
+<script type="module">
+const FLOATS = {
+  speed:        [1.0,  0.0, 4.0, 0.01],
+  scale:        [3.2,  0.2, 12.0, 0.01],
+  warp:         [0.35, 0.0, 1.5, 0.01],
+  contrast:     [1.1,  0.2, 4.0, 0.01],
+  specPower:    [12.0, 1.0, 64.0, 0.1],
+  specStrength: [0.35, 0.0, 1.5, 0.01],
+  tintStrength: [0.5,  0.0, 1.5, 0.01],
+};
+const COLORS = {
+  shadow:    [0.04, 0.05, 0.06, 1.0],
+  silver:    [0.62, 0.66, 0.72, 1.0],
+  highlight: [1.00, 1.00, 1.00, 1.0],
+  tint:      [0.42, 0.58, 0.98, 1.0],
+};
+
+const err = document.getElementById('err');
+const state = { time: 0 };
+const sliders = document.getElementById('sliders');
+
+for (const [k, [def, min, max, step]] of Object.entries(FLOATS)) {
+  state[k] = def;
+  const l = document.createElement('label');
+  l.innerHTML = k + '<span class="val">' + def + '</span>';
+  const r = document.createElement('input');
+  r.type = 'range'; r.min = min; r.max = max; r.step = step; r.value = def;
+  const v = l.querySelector('.val');
+  r.oninput = () => { state[k] = parseFloat(r.value); v.textContent = Number(r.value).toFixed(2); };
+  sliders.append(l, r);
+}
+Object.assign(state, COLORS);
+
+// 字节布局必须与 struct Uniforms 逐字段对齐：
+//   size(0) time(8) speed(12) scale(16) warp(20) contrast(24)
+//   specPower(28) specStrength(32) tintStrength(36)  <- 后 4 字节为隐式填充
+//   shadow(48) silver(64) highlight(80) tint(96)      <- 总计 112 字节
+const SIZE_IDX = 0, TIME_IDX = 2, S0_IDX = 3, PAD0 = 10, PAD1 = 11, C_IDX = 12;
+const BUF = 112;
+
+const canvas = document.getElementById('c');
+let device, ctx, pipeline, uniformBuf, vbuf;
+
+async function init() {
+  if (!navigator.gpu) { err.textContent = '当前浏览器不支持 WebGPU（Chrome/Edge 113+，或开启 chrome://flags/#enable-unsafe-webgpu）'; return; }
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) { err.textContent = 'requestAdapter() 返回 null'; return; }
+  device = await adapter.requestDevice();
+  ctx = canvas.getContext('webgpu');
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({ device, format, alphaMode: 'premultiplied' });
+
+  const code = document.getElementById('shader').textContent;
+  const module = device.createShaderModule({ code, label: 'mf-replica' });
+  const info = await module.getCompilationInfo?.();
+  if (info && info.messages.length) {
+    err.textContent = info.messages.map(m => `[${m.type}] ${m.lineNum}:${m.linePos} ${m.message}`).join('\n');
+  }
+
+  uniformBuf = device.createBuffer({ size: BUF, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const bgl = device.createBindGroupLayout({
+    entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }],
+  });
+  pipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
+    vertex: { module, entryPoint: 'vs' },
+    fragment: { module, entryPoint: 'fs', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' },
+  });
+
+  resize();
+  requestAnimationFrame(frame);
+}
+
+function resize() {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const r = canvas.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.floor(r.width * dpr));
+  canvas.height = Math.max(1, Math.floor(r.height * dpr));
+}
+
+const F32 = new Float32Array(BUF / 4);
+const SCALARS = ['speed', 'scale', 'warp', 'contrast', 'specPower', 'specStrength', 'tintStrength'];
+const COLORS_ORDER = ['shadow', 'silver', 'highlight', 'tint'];
+
+function pack(time) {
+  F32[SIZE_IDX] = canvas.width;
+  F32[SIZE_IDX + 1] = canvas.height;
+  F32[TIME_IDX] = time;
+  F32[PAD0] = 0; F32[PAD1] = 0;           // 显式写出隐式填充，避免复用缓冲残留
+  SCALARS.forEach((k, i) => { F32[S0_IDX + i] = state[k]; });
+  COLORS_ORDER.forEach((k, i) => {
+    F32.set(state[k], C_IDX + i * 4);
+  });
+  return F32;
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.05); last = now;
+  state.time += dt;
+  resize();
+  const data = pack(state.time);
+  device.queue.writeBuffer(uniformBuf, 0, data);
+
+  const bg = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: uniformBuf } }],
+  });
+  const enc = device.createCommandEncoder();
+  const pass = enc.beginRenderPass({
+    colorAttachments: [{
+      view: ctx.getCurrentTexture().createView(),
+      clearValue: { r: 0, g: 0, b: 0, a: 1 },
+      loadOp: 'clear', storeOp: 'store',
+    }],
+  });
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bg);
+  pass.draw(3);
+  pass.end();
+  device.queue.submit([enc.finish()]);
+  requestAnimationFrame(frame);
+}
+
+addEventListener('resize', resize);
+init().catch(e => { err.textContent = e.message; });
+</script>
+</body>
+</html>

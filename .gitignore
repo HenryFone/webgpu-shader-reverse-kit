@@ -1,0 +1,10 @@
+# 被分析站点的原始 chunk / 模块 / 着色器，绝不入库
+chunks/
+chunks_*/
+modules/
+shaders/
+wgsl/
+wgsl_*/
+*.metal
+*.sksl
+node_modules/
